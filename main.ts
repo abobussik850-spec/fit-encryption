@@ -473,18 +473,7 @@ export default class FitPlugin extends Plugin {
 				callback: this.triggerManualSync
 			});
 
-			// Encryption unlock/lock commands (simple wrapper)
-			this.addCommand({
-				id: 'fit-unlock-encryption',
-				name: 'FIT: Unlock encryption',
-				callback: async () => await this.unlockEncryption(),
-			});
-
-			this.addCommand({
-				id: 'fit-lock-encryption',
-				name: 'FIT: Lock encryption',
-				callback: async () => await this.lockEncryption(),
-			});
+			// Encryption unlock/lock commands removed - encryption is mandatory and auto-enabled
 
 			this.addCommand({
 				id: 'fit-export-master-key',
@@ -548,75 +537,9 @@ export default class FitPlugin extends Plugin {
 
 	// Lightweight unlock flow for setting/clearing master key used by sync
 	async unlockEncryption() {
-		const password = window.prompt('Enter password to unlock or create master key');
-		if (!password) { return; }
-		const data = await this.loadData();
-		// If wrapped master exists - unwrap
-		if (data && data.wrappedMaster) {
-			try {
-				const wrapSalt = Buffer.from(data.wrapSalt, 'base64');
-				let wrapKey: Buffer;
-				try {
-					const argon2 = await import('argon2');
-					const raw = await (argon2 as any).hash(password, {
-						type: (argon2 as any).argon2id,
-						salt: wrapSalt,
-						raw: true,
-						hashLength: 32,
-						timeCost: 3,
-						memoryCost: 1 << 16,
-						parallelism: 1,
-					});
-					wrapKey = Buffer.from(raw);
-				} catch (e) {
-					wrapKey = crypto.scryptSync(password, wrapSalt, 32);
-				}
-				const wrapNonce = Buffer.from(data.wrapNonce, 'base64');
-				const wrapTag = Buffer.from(data.wrapTag, 'base64');
-				const wrapped = Buffer.from(data.wrappedMaster, 'base64');
-				const dec = crypto.createDecipheriv('chacha20-poly1305', wrapKey, wrapNonce, { authTagLength: 16 });
-				dec.setAuthTag(wrapTag);
-				const master = Buffer.concat([dec.update(wrapped), dec.final()]);
-				setMasterKey(master);
-				new Notice('FIT: master key unwrapped and loaded in memory');
-			} catch (err) {
-				console.error('Failed to unwrap master key', err);
-				new Notice('Failed to unlock: wrong password or corrupted data');
-			}
-		} else {
-			// Create new master and persist wrapped version
-			const master = crypto.randomBytes(32);
-			const wrapSalt = crypto.randomBytes(16);
-			let wrapKey: Buffer;
-			try {
-				const argon2 = await import('argon2');
-				const raw = await (argon2 as any).hash(password, {
-					type: (argon2 as any).argon2id,
-					salt: wrapSalt,
-					raw: true,
-					hashLength: 32,
-					timeCost: 3,
-					memoryCost: 1 << 16,
-					parallelism: 1,
-				});
-				wrapKey = Buffer.from(raw);
-			} catch (e) {
-				wrapKey = crypto.scryptSync(password, wrapSalt, 32);
-			}
-			const wrapNonce = crypto.randomBytes(12);
-			const enc = crypto.createCipheriv('chacha20-poly1305', wrapKey, wrapNonce, { authTagLength: 16 });
-			const wrapped = Buffer.concat([enc.update(master), enc.final()]);
-			const wrapTag = enc.getAuthTag();
-			const newData = Object.assign({}, data, {
-				wrappedMaster: wrapped.toString('base64'),
-				wrapSalt: wrapSalt.toString('base64'),
-				wrapNonce: wrapNonce.toString('base64'),
-				wrapTag: wrapTag.toString('base64')
-			});
-			await this.saveData(newData);
-			setMasterKey(master);
-			new Notice('FIT: new master key generated and stored (wrapped)');
-		}
+		// Manual unlock removed: encryption is mandatory and handled automatically.
+		fitLogger.log('[Plugin] unlockEncryption() called but is deprecated; encryption is always enabled');
+		new Notice('Manual unlock is disabled — encryption is always enabled');
 	}
 
 	/** Modal to show large text (exported key) and copy to clipboard */
@@ -782,8 +705,9 @@ export default class FitPlugin extends Plugin {
 	}
 
 	async lockEncryption() {
-		clearMasterKey();
-		new Notice('FIT: master key cleared from memory');
+		// Manual lock removed: keep master key in memory for sync operations.
+		fitLogger.log('[Plugin] lockEncryption() called but is deprecated; no action taken');
+		new Notice('Manual lock is disabled — encryption remains active');
 	}
 
 	async loadLocalStore() {

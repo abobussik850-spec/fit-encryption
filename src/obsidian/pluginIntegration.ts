@@ -48,21 +48,7 @@ export default class FitEncryptionPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
-    this.addCommand({
-      id: 'fit-unlock-encryption',
-      name: 'FIT: Unlock encryption (enter password or create master key)',
-      callback: async () => this.unlockFlow(),
-    });
-
-    this.addCommand({
-      id: 'fit-lock-encryption',
-      name: 'FIT: Lock encryption (forget master key in memory)',
-      callback: async () => {
-        this.masterKey = undefined;
-        clearMasterKey();
-        new Notice('FIT: master key cleared from memory');
-      },
-    });
+    // Unlock/lock commands removed from this integration - encryption is handled automatically.
 
     this.addCommand({
       id: 'fit-migrate-fit-ids',
@@ -147,8 +133,10 @@ export default class FitEncryptionPlugin extends Plugin {
         const wrapNonce = Buffer.from(this.settings.wrapNonce!, 'base64');
         const wrapTag = Buffer.from(this.settings.wrapTag!, 'base64');
         const wrapped = Buffer.from(this.settings.wrappedMaster!, 'base64');
-        const dec = crypto.createDecipheriv('chacha20-poly1305', wrapKey, wrapNonce, { authTagLength: 16 });
-        dec.setAuthTag(wrapTag);
+        const { getAeadAlgorithm } = await import('../encryption/alg');
+        const algo = getAeadAlgorithm();
+        const dec = crypto.createDecipheriv(algo, wrapKey, wrapNonce, { authTagLength: 16 } as any);
+        (dec as any).setAuthTag(wrapTag);
         const master = Buffer.concat([dec.update(wrapped), dec.final()]);
         this.masterKey = master;
         setMasterKey(master);
@@ -163,9 +151,11 @@ export default class FitEncryptionPlugin extends Plugin {
       const wrapSalt = crypto.randomBytes(16);
       const wrapKey = await this.deriveWrappingKey(password, wrapSalt);
       const wrapNonce = crypto.randomBytes(12);
-      const enc = crypto.createCipheriv('chacha20-poly1305', wrapKey, wrapNonce, { authTagLength: 16 });
+      const { getAeadAlgorithm } = await import('../encryption/alg');
+      const algo = getAeadAlgorithm();
+      const enc = crypto.createCipheriv(algo, wrapKey, wrapNonce, { authTagLength: 16 } as any);
       const wrapped = Buffer.concat([enc.update(master), enc.final()]);
-      const wrapTag = enc.getAuthTag();
+      const wrapTag = (enc as any).getAuthTag();
       this.settings.wrappedMaster = wrapped.toString('base64');
       this.settings.wrapSalt = wrapSalt.toString('base64');
       this.settings.wrapNonce = wrapNonce.toString('base64');

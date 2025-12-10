@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { getAeadAlgorithm, AEAD_TAG_LENGTH, AEAD_NONCE_BYTES } from './alg';
 import type { EncryptedPackage, EncryptOptions } from './types';
 
 async function tryArgon2(password: string, salt: Buffer, length = 32): Promise<Buffer> {
@@ -39,11 +40,20 @@ export function deriveFileKey(masterKey: Buffer, fileId: string): Buffer {
 }
 
 export function encryptWithFileKey(fileKey: Buffer, plaintext: Buffer, aad?: Buffer): { nonce: Buffer; ciphertext: Buffer; tag: Buffer } {
-  const nonce = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('chacha20-poly1305', fileKey, nonce, { authTagLength: 16 });
-  if (aad) cipher.setAAD(aad, { plaintextLength: plaintext.length });
+  const algo = getAeadAlgorithm();
+  const nonce = crypto.randomBytes(AEAD_NONCE_BYTES);
+  const cipher = crypto.createCipheriv(algo, fileKey, nonce, { authTagLength: AEAD_TAG_LENGTH } as any);
+  if (aad) {
+    // Some runtimes require plaintextLength option for setAAD
+    try {
+      (cipher as any).setAAD(aad, { plaintextLength: plaintext.length });
+    } catch (e) {
+      // Fallback to calling without options
+      (cipher as any).setAAD(aad as Buffer);
+    }
+  }
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
+  const tag = (cipher as any).getAuthTag();
   return { nonce, ciphertext, tag };
 }
 

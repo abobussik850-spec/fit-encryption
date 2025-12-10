@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { getAeadAlgorithm, AEAD_TAG_LENGTH, AEAD_NONCE_BYTES } from './alg';
 import type { EncryptedPackage } from './types';
 
 export async function deriveMasterKeyFromSalt(password: string, salt: Buffer): Promise<Buffer> {
@@ -26,9 +27,16 @@ function deriveFileKey(masterKey: Buffer, fileId: string): Buffer {
 }
 
 export function decryptWithFileKey(fileKey: Buffer, nonce: Buffer, ciphertext: Buffer, tag: Buffer, aad?: Buffer): Buffer {
-  const decipher = crypto.createDecipheriv('chacha20-poly1305', fileKey, nonce, { authTagLength: 16 });
-  if (aad) decipher.setAAD(aad, { plaintextLength: ciphertext.length });
-  decipher.setAuthTag(tag);
+  const algo = getAeadAlgorithm();
+  const decipher = crypto.createDecipheriv(algo, fileKey, nonce, { authTagLength: AEAD_TAG_LENGTH } as any);
+  if (aad) {
+    try {
+      (decipher as any).setAAD(aad, { plaintextLength: ciphertext.length });
+    } catch (e) {
+      (decipher as any).setAAD(aad as Buffer);
+    }
+  }
+  (decipher as any).setAuthTag(tag);
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return plaintext;
 }
