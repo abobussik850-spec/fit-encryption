@@ -480,8 +480,19 @@ export default class FitPlugin extends Plugin {
 				name: 'FIT: Export master key',
 				callback: async () => {
 					const mk = getMasterKey();
-					if (!mk) { new Notice('No master key in memory'); return; }
-					this.showExportKeyModal(mk.toString('base64'));
+					if (!mk) { 
+						new Notice('No master key in memory'); 
+						return; 
+					}
+					const keyB64 = mk.toString('base64');
+					try {
+						await navigator.clipboard.writeText(keyB64);
+						new Notice('Master key copied to clipboard! Store it safely. ⚠️ Keep it secret — if you lose it, you cannot decrypt your files.');
+						fitLogger.log('[Plugin] Master key exported and copied to clipboard');
+					} catch (e) {
+						new Notice('Failed to copy to clipboard. Please try again.');
+						fitLogger.log('[Plugin] Failed to copy master key to clipboard', { error: e });
+					}
 				}
 			});
 
@@ -540,35 +551,6 @@ export default class FitPlugin extends Plugin {
 		// Manual unlock removed: encryption is mandatory and handled automatically.
 		fitLogger.log('[Plugin] unlockEncryption() called but is deprecated; encryption is always enabled');
 		new Notice('Manual unlock is disabled — encryption is always enabled');
-	}
-
-	/** Modal to show large text (exported key) and copy to clipboard */
-	private showExportKeyModal(keyB64: string) {
-		class ExportModal extends (window as any).Modal {
-			constructor(app: any, public key: string) { super(app); }
-			onOpen() {
-				const { contentEl } = this;
-				contentEl.createEl('h3', { text: 'Export master key (base64)' });
-				const pre = contentEl.createEl('textarea');
-				pre.style.width = '100%';
-				pre.style.height = '120px';
-				pre.value = this.key;
-				pre.readOnly = true;
-				const copyBtn = contentEl.createEl('button', { text: 'Copy to clipboard' });
-				copyBtn.addEventListener('click', async () => {
-					try {
-						await navigator.clipboard.writeText(this.key);
-						new Notice('Master key copied to clipboard. Store it safely.');
-					} catch (e) {
-						window.prompt('Copy this master key', this.key);
-					}
-				});
-				contentEl.createEl('div', { text: '⚠️ Keep this key secret. If you lose it you cannot decrypt files.' });
-			}
-			onClose() { this.contentEl.empty(); }
-		}
-		const m = new ExportModal(this.app, keyB64) as any;
-		m.open();
 	}
 
 	/** Rotate master key: generate new key and re-encrypt all remote files */
