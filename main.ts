@@ -485,14 +485,24 @@ export default class FitPlugin extends Plugin {
 						return; 
 					}
 					const keyB64 = mk.toString('base64');
-					try {
-						await navigator.clipboard.writeText(keyB64);
-						new Notice('Master key copied to clipboard! Store it safely. ⚠️ Keep it secret — if you lose it, you cannot decrypt your files.');
-						fitLogger.log('[Plugin] Master key exported and copied to clipboard');
-					} catch (e) {
-						new Notice('Failed to copy to clipboard. Please try again.');
-						fitLogger.log('[Plugin] Failed to copy master key to clipboard', { error: e });
-					}
+					
+					// Create a blob and download as file
+					const timestamp = new Date().toISOString().slice(0, 10);
+					const filename = `fit-master-key-${timestamp}.txt`;
+					const content = `FIT Master Key (Base64)\n======================\n\n${keyB64}\n\n⚠️ KEEP THIS SECRET!\nIf you lose this key, you cannot decrypt your files.\nStore it safely (e.g., password manager, encrypted drive).`;
+					
+					const blob = new Blob([content], { type: 'text/plain' });
+					const url = URL.createObjectURL(blob);
+					const a = document.createElement('a');
+					a.href = url;
+					a.download = filename;
+					document.body.appendChild(a);
+					a.click();
+					document.body.removeChild(a);
+					URL.revokeObjectURL(url);
+					
+					new Notice(`Master key saved to ${filename}. Store it safely!`);
+					fitLogger.log('[Plugin] Master key exported as file');
 				}
 			});
 
