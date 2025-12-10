@@ -9,6 +9,8 @@ import { ApplyChangesResult, VaultError } from "./vault";
 import { Base64Content, FileContent, isBinaryExtension } from "./util/contentEncoding";
 import { detectNormalizationMismatches } from "./util/filePath";
 import { CommitSha } from "./util/hashing";
+import { getMasterKey, hasMasterKey } from './encryption/manager';
+import { deriveFileKey, encryptWithFileKey, decryptWithFileKey } from './encryption';
 
 // Helper to log SHA cache updates with provenance tracking
 function logCacheUpdate(
@@ -371,6 +373,47 @@ export class FitSync implements IFitSync {
 
 		const addToLocal = resolvedChanges;
 		const deleteFromLocal = safeDeleteFromLocal;
+
+		// If master key available, attempt to decrypt incoming packages before writing locally
+		if (hasMasterKey()) {
+			const mk = getMasterKey()!;
+			for (let i = 0; i < addToLocal.length; i++) {
+				const item = addToLocal[i];
+				try {
+					// Only attempt decrypt if content is plaintext (we stored JSON pkg as plaintext)
+					const raw = item.content.toRaw();
+					if (raw.encoding === 'plaintext') {
+						let pkg: any;
+						try {
+							pkg = JSON.parse(raw.content as string);
+						} catch (e) {
+							continue; // not JSON, skip
+						}
+						if (pkg && pkg.nonce && pkg.ciphertext && pkg.tag) {
+							const fileKey = deriveFileKey(mk, item.path);
+							const aad = Buffer.from(item.path, 'utf8');
+							const plaintext = decryptWithFileKey(
+								fileKey,
+								Buffer.from(pkg.nonce, 'base64'),
+								Buffer.from(pkg.ciphertext, 'base64'),
+								Buffer.from(pkg.tag, 'base64'),
+								aad
+							);
+							if (pkg.isBinary) {
+								// binary -> store as base64
+								const b64 = Buffer.from(plaintext).toString('base64');
+								addToLocal[i] = { path: item.path, content: FileContent.fromBase64(b64) };
+							} else {
+								addToLocal[i] = { path: item.path, content: FileContent.fromPlainText(Buffer.from(plaintext).toString('utf8')) };
+							}
+						}
+					}
+				} catch (err) {
+					fitLogger.log('[FitSync] Failed to decrypt remote file before writing locally', { path: item.path, error: err });
+					throw err;
+				}
+			}
+		}
 
 		// Apply changes (filtered to save conflicts to _fit/)
 		const result = await this.fit.localVault.applyChanges(addToLocal, deleteFromLocal);
@@ -845,6 +888,41 @@ export class FitSync implements IFitSync {
 			} else {
 				const content = await this.fit.localVault.readFileContent(change.path);
 				filesToWrite.push({ path: change.path, content });
+			}
+		}
+
+		// If master key available, encrypt files before sending to remote
+		if (hasMasterKey()) {
+			const mk = getMasterKey()!;
+			for (let i = 0; i < filesToWrite.length; i++) {
+				const entry = filesToWrite[i];
+				try {
+					const raw = entry.content.toRaw();
+					let plaintextBuf: Buffer;
+					let isBinary = false;
+					if (raw.encoding === 'plaintext') {
+						plaintextBuf = Buffer.from(raw.content, 'utf8');
+					} else {
+						plaintextBuf = Buffer.from(raw.content as string, 'base64');
+						isBinary = true;
+					}
+					const fileKey = deriveFileKey(mk, entry.path);
+					const aad = Buffer.from(entry.path, 'utf8');
+					const { nonce, ciphertext, tag } = encryptWithFileKey(fileKey, plaintextBuf, aad);
+					const pkg = {
+						version: 1,
+						salt: '',
+						nonce: nonce.toString('base64'),
+						ciphertext: ciphertext.toString('base64'),
+						tag: tag.toString('base64'),
+						isBinary
+					};
+					// Store JSON package as plaintext so remote stores readable JSON
+					entry.content = FileContent.fromPlainText(JSON.stringify(pkg));
+				} catch (err) {
+					fitLogger.log('[FitSync] Failed to encrypt file before upload', { path: entry.path, error: err });
+					throw err;
+				}
 			}
 		}
 

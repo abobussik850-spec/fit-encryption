@@ -1,6 +1,7 @@
 import { Plugin, Modal, App, Notice, TFile } from 'obsidian';
 import crypto from 'crypto';
 import encryption, { deriveFileKey, encryptWithFileKey, decryptWithFileKey } from '../encryption';
+import { setMasterKey, clearMasterKey } from '../encryption/manager';
 
 type StoredSettings = {
   wrappedMaster?: string; // base64 ciphertext
@@ -59,6 +60,7 @@ export default class FitEncryptionPlugin extends Plugin {
       name: 'FIT: Lock encryption (forget master key in memory)',
       callback: async () => {
         this.masterKey = undefined;
+        clearMasterKey();
         new Notice('FIT: master key cleared from memory');
       },
     });
@@ -126,6 +128,7 @@ export default class FitEncryptionPlugin extends Plugin {
         dec.setAuthTag(wrapTag);
         const master = Buffer.concat([dec.update(wrapped), dec.final()]);
         this.masterKey = master;
+        setMasterKey(master);
         new Notice('FIT: master key unwrapped and loaded in memory');
       } catch (err) {
         console.error('Failed to unwrap master key', err);
@@ -146,6 +149,7 @@ export default class FitEncryptionPlugin extends Plugin {
       this.settings.wrapTag = wrapTag.toString('base64');
       await this.saveSettings();
       this.masterKey = master;
+      setMasterKey(master);
       new Notice('FIT: new master key generated and stored (wrapped)');
     }
   }
