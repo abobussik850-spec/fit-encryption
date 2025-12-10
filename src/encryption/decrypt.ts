@@ -20,14 +20,14 @@ export async function deriveMasterKeyFromSalt(password: string, salt: Buffer): P
   }
 }
 
-export function deriveFileKey(masterKey: Buffer, fileId: string): Buffer {
+function deriveFileKey(masterKey: Buffer, fileId: string): Buffer {
   const info = Buffer.from(fileId, 'utf8');
-  return crypto.hkdfSync('sha256', masterKey, undefined, info, 32);
+  return Buffer.from(crypto.hkdfSync('sha256', masterKey, Buffer.alloc(0), info, 32));
 }
 
 export function decryptWithFileKey(fileKey: Buffer, nonce: Buffer, ciphertext: Buffer, tag: Buffer, aad?: Buffer): Buffer {
   const decipher = crypto.createDecipheriv('chacha20-poly1305', fileKey, nonce, { authTagLength: 16 });
-  if (aad) decipher.setAAD(aad);
+  if (aad) decipher.setAAD(aad, { plaintextLength: ciphertext.length });
   decipher.setAuthTag(tag);
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return plaintext;

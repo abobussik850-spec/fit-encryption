@@ -34,13 +34,14 @@ export function deriveFileKey(masterKey: Buffer, fileId: string): Buffer {
   const info = Buffer.from(fileId, 'utf8');
   // hkdfSync(node) signature: (digest, ikm, salt, info, keylen)
   // no salt passed here (we already used salt in master key derivation)
-  return crypto.hkdfSync('sha256', masterKey, undefined, info, 32);
+  // pass an explicit empty salt Buffer to satisfy typings and runtime expectations
+  return Buffer.from(crypto.hkdfSync('sha256', masterKey, Buffer.alloc(0), info, 32));
 }
 
 export function encryptWithFileKey(fileKey: Buffer, plaintext: Buffer, aad?: Buffer): { nonce: Buffer; ciphertext: Buffer; tag: Buffer } {
   const nonce = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('chacha20-poly1305', fileKey, nonce, { authTagLength: 16 });
-  if (aad) cipher.setAAD(aad);
+  if (aad) cipher.setAAD(aad, { plaintextLength: plaintext.length });
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
   return { nonce, ciphertext, tag };
