@@ -588,6 +588,51 @@ export class FitSync implements IFitSync {
 				}))
 		);
 
+		// If master key available, try to detect encrypted JSON packages and decrypt them
+		if (hasMasterKey()) {
+			const mk = getMasterKey()!;
+			for (let i = 0; i < addToLocalNonClashed.length; i++) {
+				const entry = addToLocalNonClashed[i];
+				try {
+					// Attempt to get plaintext representation (remote blobs are base64 encoded)
+					let asPlain: string | null = null;
+					try {
+						asPlain = entry.content.toPlainText();
+					} catch (e) {
+						// Not valid UTF-8 -> cannot be our JSON package
+						asPlain = null;
+					}
+					if (!asPlain) continue;
+					// Try parse JSON
+					let pkg: any = null;
+					try {
+						pkg = JSON.parse(asPlain);
+					} catch (e) {
+						pkg = null;
+					}
+					if (!pkg || !pkg.nonce || !pkg.ciphertext || !pkg.tag) continue;
+					// Looks like encrypted package — attempt decrypt
+					const fileKey = deriveFileKey(mk, entry.path);
+					const aad = Buffer.from(entry.path, 'utf8');
+					const nonce = Buffer.from(pkg.nonce, 'base64');
+					const ciphertext = Buffer.from(pkg.ciphertext, 'base64');
+					const tag = Buffer.from(pkg.tag, 'base64');
+					const plainBuf = decryptWithFileKey(fileKey, nonce, ciphertext, tag, aad);
+					if (pkg.isBinary) {
+						// store as base64 content
+						const b64 = plainBuf.toString('base64');
+						entry.content = FileContent.fromBase64(b64);
+					} else {
+						entry.content = FileContent.fromPlainText(plainBuf.toString('utf8'));
+					}
+					fitLogger.log('[FitSync] Decrypted remote package for', { path: entry.path });
+				} catch (err) {
+					fitLogger.log('[FitSync] Failed to decrypt remote package (leaving as-is)', { path: entry.path, error: err });
+					// leave content unchanged on failure
+				}
+			}
+		}
+
 		// Collect all paths that need filesystem existence checking across all phases
 		const pathsToStat = new Set<string>();
 
@@ -906,7 +951,15 @@ export class FitSync implements IFitSync {
 						plaintextBuf = Buffer.from(raw.content as string, 'base64');
 						isBinary = true;
 					}
-					const fileKey = deriveFileKey(mk, entry.path);
+					// Use stable fileId from frontmatter when available/possible
+					let fileId = entry.path;
+					try {
+						const maybe = await this.fit.localVault.getOrCreateFileId(entry.path);
+						if (maybe) fileId = maybe;
+					} catch (e) {
+						// ignore and fallback to path
+					}
+					const fileKey = deriveFileKey(mk, fileId);
 					const aad = Buffer.from(entry.path, 'utf8');
 					const { nonce, ciphertext, tag } = encryptWithFileKey(fileKey, plaintextBuf, aad);
 					const pkg = {
@@ -915,7 +968,8 @@ export class FitSync implements IFitSync {
 						nonce: nonce.toString('base64'),
 						ciphertext: ciphertext.toString('base64'),
 						tag: tag.toString('base64'),
-						isBinary
+						isBinary,
+						fileId
 					};
 					// Store JSON package as plaintext so remote stores readable JSON
 					entry.content = FileContent.fromPlainText(JSON.stringify(pkg));

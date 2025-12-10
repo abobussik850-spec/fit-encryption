@@ -5,6 +5,7 @@ export type EncryptedPackage = {
   ciphertext: string; // base64
   tag: string; // base64
   isBinary?: boolean;
+  fileId?: string;
 };
 
 export type EncryptOptions = {

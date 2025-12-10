@@ -1,6 +1,5 @@
 import { Plugin, Modal, App, Notice, TFile } from 'obsidian';
 import crypto from 'crypto';
-import encryption, { deriveFileKey, encryptWithFileKey, decryptWithFileKey } from '../encryption';
 import { setMasterKey, clearMasterKey } from '../encryption/manager';
 
 type StoredSettings = {
@@ -66,15 +65,39 @@ export default class FitEncryptionPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: 'fit-encrypt-active-file',
-      name: 'FIT: Encrypt active file',
-      callback: async () => this.encryptActiveFile(),
-    });
-
-    this.addCommand({
-      id: 'fit-decrypt-active-file',
-      name: 'FIT: Decrypt active file',
-      callback: async () => this.decryptActiveFile(),
+      id: 'fit-migrate-fit-ids',
+      name: 'FIT: Ensure stable IDs (add fit_id to Markdown files)',
+      callback: async () => {
+        try {
+          const files = this.app.vault.getFiles();
+          let checked = 0;
+          let updated = 0;
+          for (const f of files) {
+            // Only operate on Markdown files to avoid touching binaries
+            if (f.extension !== 'md') continue;
+            checked++;
+            const text = await this.app.vault.read(f);
+            const fmMatch = text.match(/^---\n([\s\S]*?)\n---\n?/);
+            let fm = '';
+            let body = text;
+            if (fmMatch) {
+              fm = fmMatch[1];
+              body = text.slice(fmMatch[0].length);
+            }
+            const idMatch = fm.match(/^fit_id:\s*(.+)$/m);
+            if (idMatch && idMatch[1]) continue;
+            const uuid = (globalThis as any).crypto?.randomUUID ? (globalThis as any).crypto.randomUUID() : require('crypto').randomUUID();
+            const newFm = fm ? (fm + '\nfit_id: ' + uuid) : ('fit_id: ' + uuid);
+            const newText = '---\n' + newFm + '\n---\n' + body;
+            await this.app.vault.modify(f, newText);
+            updated++;
+          }
+          new Notice(`FIT: checked ${checked} files, added fit_id to ${updated} files`);
+        } catch (err) {
+          console.error(err);
+          new Notice('FIT: Migration failed');
+        }
+      },
     });
   }
 
@@ -154,69 +177,4 @@ export default class FitEncryptionPlugin extends Plugin {
     }
   }
 
-  async encryptActiveFile() {
-    if (!this.masterKey) {
-      new Notice('Unlock FIT first (command: FIT: Unlock encryption)');
-      return;
-    }
-    const file = this.app.workspace.getActiveFile();
-    if (!file) {
-      new Notice('No active file');
-      return;
-    }
-    try {
-      const content = await this.app.vault.read(file);
-      const fileId = file.path; // NOTE: prefer a stable ID (UUID) in production
-      const fileKey = deriveFileKey(this.masterKey, fileId);
-      const aad = Buffer.from(file.path, 'utf8');
-      const { nonce, ciphertext, tag } = encryptWithFileKey(fileKey, Buffer.from(content, 'utf8'), aad);
-      const pkg = {
-        version: 1,
-        salt: '', // salt is unused because we use persisted masterKey
-        nonce: nonce.toString('base64'),
-        ciphertext: ciphertext.toString('base64'),
-        tag: tag.toString('base64'),
-      };
-      await this.app.vault.modify(file, JSON.stringify(pkg, null, 2));
-      new Notice('File encrypted (in-place)');
-    } catch (err) {
-      console.error(err);
-      new Notice('Encryption failed');
-    }
-  }
-
-  async decryptActiveFile() {
-    if (!this.masterKey) {
-      new Notice('Unlock FIT first (command: FIT: Unlock encryption)');
-      return;
-    }
-    const file = this.app.workspace.getActiveFile();
-    if (!file) {
-      new Notice('No active file');
-      return;
-    }
-    try {
-      const content = await this.app.vault.read(file);
-      const pkg = JSON.parse(content) as any;
-      if (!pkg || !pkg.nonce) {
-        new Notice('File does not look like FIT-encrypted package');
-        return;
-      }
-      const fileId = file.path; // same id used before
-      const fileKey = deriveFileKey(this.masterKey, fileId);
-      const aad = Buffer.from(file.path, 'utf8');
-      const plaintext = decryptWithFileKey(
-        fileKey,
-        Buffer.from(pkg.nonce, 'base64'),
-        Buffer.from(pkg.ciphertext, 'base64'),
-        Buffer.from(pkg.tag, 'base64'),
-        aad,
-      );
-      await this.app.vault.modify(file, plaintext.toString('utf8'));
-      new Notice('File decrypted');
-    } catch (err) {
-      console.error(err);
-      new Notice('Decryption failed (wrong key, fileId or corrupted data)');
-    }
-  }
 }

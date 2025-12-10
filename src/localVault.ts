@@ -8,7 +8,7 @@ import { TFile, TFolder, Vault } from "obsidian";
 import { ApplyChangesResult, IVault, VaultError, VaultReadResult } from "./vault";
 import { FileChange } from "./util/changeTracking";
 import { fitLogger } from "./logger";
-import { Base64Content, FileContent } from "./util/contentEncoding";
+import { Base64Content, FileContent, isBinaryExtension } from "./util/contentEncoding";
 import { contentToArrayBuffer, readFileContent } from "./util/obsidianHelpers";
 import { BlobSha, computeSha1 } from "./util/hashing";
 import { FilePath, detectNormalizationIssues } from "./util/filePath";
@@ -254,6 +254,63 @@ export class LocalVault implements IVault<"local"> {
 	 */
 	async readFileContent(path: string): Promise<FileContent> {
 		return readFileContent(this.vault, path);
+	}
+
+	/**
+	 * Get or create a stable UUID stored in markdown frontmatter under `fit_id`.
+	 * Only applies to plaintext files (markdown/text). For binary files, returns undefined.
+	 */
+	async getOrCreateFileId(path: string): Promise<string | undefined> {
+		const file = this.vault.getAbstractFileByPath(path);
+		if (!file || !(file instanceof TFile)) return undefined;
+		// Only operate on text files
+		if (isBinaryExtension(file.extension)) return undefined;
+		const text = await this.vault.read(file);
+		const { frontmatter, body } = LocalVault.parseFrontmatter(text);
+		const idMatch = frontmatter.match(/^fit_id:\s*(.+)$/m);
+		if (idMatch && idMatch[1]) return idMatch[1].trim();
+		const uuid = (globalThis as any).crypto?.randomUUID ? (globalThis as any).crypto.randomUUID() : require('crypto').randomUUID();
+		const newFm = frontmatter ? (frontmatter + '\nfit_id: ' + uuid) : ('fit_id: ' + uuid);
+		const newText = LocalVault.buildTextWithFrontmatter(newFm, body);
+		await this.vault.modify(file, newText);
+		return uuid;
+	}
+
+	/**
+	 * Ensure the given file contains `fit_id` in frontmatter; if missing, set it to provided fileId.
+	 * Only applies to plaintext files. Returns true if wrote/updated, false otherwise.
+	 */
+	async setFileIdIfMissing(path: string, fileId: string): Promise<boolean> {
+		const file = this.vault.getAbstractFileByPath(path);
+		if (!file || !(file instanceof TFile)) return false;
+		if (isBinaryExtension(file.extension)) return false;
+		const text = await this.vault.read(file);
+		const { frontmatter, body } = LocalVault.parseFrontmatter(text);
+		const idMatch = frontmatter.match(/^fit_id:\s*(.+)$/m);
+		if (idMatch && idMatch[1]) return false;
+		const newFm = frontmatter ? (frontmatter + '\nfit_id: ' + fileId) : ('fit_id: ' + fileId);
+		const newText = LocalVault.buildTextWithFrontmatter(newFm, body);
+		await this.vault.modify(file, newText);
+		return true;
+	}
+
+	/**
+	 * Parse YAML frontmatter from a text string.
+	 * Returns extracted frontmatter (without delimiters) and the remaining body.
+	 */
+	private static parseFrontmatter(text: string): { frontmatter: string; body: string } {
+		const fmMatch = text.match(/^---\n([\s\S]*?)\n---\n?/);
+		if (fmMatch) {
+			return { frontmatter: fmMatch[1], body: text.slice(fmMatch[0].length) };
+		}
+		return { frontmatter: '', body: text };
+	}
+
+	/**
+	 * Build a full text document from frontmatter (without delimiters) and body.
+	 */
+	private static buildTextWithFrontmatter(frontmatter: string, body: string): string {
+		return '---\n' + frontmatter + '\n---\n' + body;
 	}
 
 	/**
