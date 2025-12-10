@@ -980,7 +980,29 @@ export class FitSync implements IFitSync {
 			}
 		}
 
-		const result = await this.fit.remoteVault.applyChanges(filesToWrite, filesToDelete);
+		// Skip files larger than threshold to avoid uploading very large files
+		const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB
+		const largeFiles: string[] = [];
+		const uploadFiles = filesToWrite.filter(entry => {
+			try {
+				const size = entry.content.size();
+				if (size > MAX_UPLOAD_BYTES) {
+					largeFiles.push(entry.path);
+					return false;
+				}
+				return true;
+			} catch (e) {
+				// If size computation fails, be conservative and skip upload
+				largeFiles.push(entry.path);
+				return false;
+			}
+		});
+
+		if (largeFiles.length > 0) {
+			fitLogger.log('[FitSync] Skipping upload for files exceeding 10MB', { skipped: largeFiles });
+		}
+
+		const result = await this.fit.remoteVault.applyChanges(uploadFiles, filesToDelete);
 
 		// If no operations were performed, return null
 		// This can happen when local SHA differs from cache but content matches remote
