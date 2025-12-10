@@ -4,9 +4,12 @@
  * Defines the FitPlugin class and related types for Obsidian plugin integration.
  */
 
-import { Plugin, SettingTab, Notice } from 'obsidian';
+import { Plugin, SettingTab, Notice, Modal } from 'obsidian';
 import crypto from 'crypto';
 import { setMasterKey, clearMasterKey } from './src/encryption/manager';
+import { getMasterKey } from './src/encryption/manager';
+import { deriveFileKey, encryptWithFileKey, decryptWithFileKey } from './src/encryption';
+import { FileContent } from './src/util/contentEncoding';
 import { Fit } from '@/fit';
 import FitNotice from '@/fitNotice';
 import FitSettingTab from '@/fitSetting';
@@ -455,6 +458,9 @@ export default class FitPlugin extends Plugin {
 
 			await this.loadLocalStore();
 
+			// Ensure a master key exists (auto-generate if missing) so encryption is always enabled
+			await this.ensureMasterKey();
+
 			this.fit = new Fit(this.settings, this.localStore, this.app.vault);
 			this.fitSync = new FitSync(this.fit, this.saveLocalStoreCallback);
 			this.settingTab = new FitSettingTab(this.app, this);
@@ -478,6 +484,22 @@ export default class FitPlugin extends Plugin {
 				id: 'fit-lock-encryption',
 				name: 'FIT: Lock encryption',
 				callback: async () => await this.lockEncryption(),
+			});
+
+			this.addCommand({
+				id: 'fit-export-master-key',
+				name: 'FIT: Export master key',
+				callback: async () => {
+					const mk = getMasterKey();
+					if (!mk) { new Notice('No master key in memory'); return; }
+					this.showExportKeyModal(mk.toString('base64'));
+				}
+			});
+
+			this.addCommand({
+				id: 'fit-rotate-master-key',
+				name: 'FIT: Rotate master key (re-encrypt remote files)',
+				callback: async () => await this.rotateMasterKey(),
 			});
 
 			// This adds a settings tab so the user can configure various aspects of the plugin
@@ -595,6 +617,168 @@ export default class FitPlugin extends Plugin {
 			setMasterKey(master);
 			new Notice('FIT: new master key generated and stored (wrapped)');
 		}
+	}
+
+	/** Modal to show large text (exported key) and copy to clipboard */
+	private showExportKeyModal(keyB64: string) {
+		class ExportModal extends (window as any).Modal {
+			constructor(app: any, public key: string) { super(app); }
+			onOpen() {
+				const { contentEl } = this;
+				contentEl.createEl('h3', { text: 'Export master key (base64)' });
+				const pre = contentEl.createEl('textarea');
+				pre.style.width = '100%';
+				pre.style.height = '120px';
+				pre.value = this.key;
+				pre.readOnly = true;
+				const copyBtn = contentEl.createEl('button', { text: 'Copy to clipboard' });
+				copyBtn.addEventListener('click', async () => {
+					try {
+						await navigator.clipboard.writeText(this.key);
+						new Notice('Master key copied to clipboard. Store it safely.');
+					} catch (e) {
+						window.prompt('Copy this master key', this.key);
+					}
+				});
+				contentEl.createEl('div', { text: '⚠️ Keep this key secret. If you lose it you cannot decrypt files.' });
+			}
+			onClose() { this.contentEl.empty(); }
+		}
+		const m = new ExportModal(this.app, keyB64) as any;
+		m.open();
+	}
+
+	/** Rotate master key: generate new key and re-encrypt all remote files */
+	async rotateMasterKey() {
+		if (!confirm('Rotate master key? This will re-encrypt all remote files. Make sure you have a backup of your current master key. Continue?')) return;
+		const oldMaster = getMasterKey();
+		if (!oldMaster) {
+			new Notice('No master key in memory to rotate from');
+			return;
+		}
+		new Notice('Starting master key rotation - this may take a while');
+		fitLogger.log('[Plugin] Starting master key rotation');
+		try {
+			// Get remote state
+			const { state: remoteState } = await this.fit.remoteVault.readFromSource();
+			const paths = Object.keys(remoteState).filter(p => this.fit.shouldSyncPath(p));
+			const filesToWrite: Array<{ path: string; plaintext: Buffer; fileId: string }> = [];
+			for (const path of paths) {
+				try {
+					const content = await this.fit.remoteVault.readFileContent(path);
+					const raw = content.toRaw();
+					let plaintextBuf: Buffer;
+					let fileId = path;
+					if (raw.encoding === 'plaintext') {
+						// Try parse JSON package
+						try {
+							const parsed = JSON.parse(raw.content as string);
+							if (parsed && parsed.nonce && parsed.ciphertext) {
+								fileId = parsed.fileId || path;
+								const nonce = Buffer.from(parsed.nonce, 'base64');
+								const ciphertext = Buffer.from(parsed.ciphertext, 'base64');
+								const tag = Buffer.from(parsed.tag, 'base64');
+								const aad = Buffer.from(path, 'utf8');
+								const fileKey = deriveFileKey(oldMaster, fileId);
+								plaintextBuf = decryptWithFileKey(fileKey, nonce, ciphertext, tag, aad);
+							} else {
+								plaintextBuf = Buffer.from(raw.content as string, 'utf8');
+							}
+						} catch (e) {
+							plaintextBuf = Buffer.from(raw.content as string, 'utf8');
+						}
+					} else {
+						// Binary - decode base64
+						const base64 = raw.content as string;
+						try {
+							const decoded = Buffer.from(base64, 'base64').toString('utf8');
+							const parsed = JSON.parse(decoded);
+							if (parsed && parsed.nonce && parsed.ciphertext) {
+								fileId = parsed.fileId || path;
+								const nonce = Buffer.from(parsed.nonce, 'base64');
+								const ciphertext = Buffer.from(parsed.ciphertext, 'base64');
+								const tag = Buffer.from(parsed.tag, 'base64');
+								const aad = Buffer.from(path, 'utf8');
+								const fileKey = deriveFileKey(oldMaster, fileId);
+								plaintextBuf = decryptWithFileKey(fileKey, nonce, ciphertext, tag, aad);
+							} else {
+								plaintextBuf = Buffer.from(base64, 'base64');
+							}
+						} catch (e) {
+							plaintextBuf = Buffer.from(base64, 'base64');
+						}
+					}
+					filesToWrite.push({ path, plaintext: plaintextBuf, fileId });
+				} catch (e) {
+					fitLogger.log('[Plugin] Failed to process remote file for rotation', { path, error: e });
+				}
+			}
+			// Now generate new master and re-encrypt files
+			const newMaster = crypto.randomBytes(32);
+			const uploadWrites: Array<{ path: string; content: any }> = [];
+			for (const f of filesToWrite) {
+				try {
+					const fileKey = deriveFileKey(newMaster, f.fileId);
+					const aad = Buffer.from(f.path, 'utf8');
+					const { nonce, ciphertext, tag } = encryptWithFileKey(fileKey, f.plaintext, aad);
+					const pkg = {
+						version: 1,
+						salt: '',
+						nonce: nonce.toString('base64'),
+						ciphertext: ciphertext.toString('base64'),
+						tag: tag.toString('base64'),
+						isBinary: false,
+						fileId: f.fileId
+					};
+					uploadWrites.push({ path: f.path, content: FileContent.fromPlainText(JSON.stringify(pkg)) });
+				} catch (e) {
+					fitLogger.log('[Plugin] Failed to encrypt during rotation', { path: f.path, error: e });
+				}
+			}
+			// Apply changes
+			if (uploadWrites.length > 0) {
+				await this.fit.remoteVault.applyChanges(uploadWrites, []);
+			}
+			// Persist new master
+			const data = await this.loadData();
+			const newData = Object.assign({}, data, { wrappedMaster: newMaster.toString('base64'), wrapSalt: '' });
+			await this.saveData(newData);
+			setMasterKey(newMaster);
+			new Notice('Master key rotation completed');
+			fitLogger.log('[Plugin] Master key rotation completed');
+		} catch (err) {
+			fitLogger.log('[Plugin] Master key rotation failed', { error: err });
+			new Notice('Master key rotation failed - check logs');
+		}
+	}
+
+	/**
+	 * Ensure a master key exists in plugin storage. If missing, generate a new
+	 * random master key, persist it (base64) and set it in memory. This makes
+	 * encryption mandatory by default.
+	 */
+	private async ensureMasterKey(): Promise<void> {
+		const data = await this.loadData();
+		if (data && data.wrappedMaster) {
+			// If wrappedMaster exists, treat empty wrapSalt as a raw stored master
+			try {
+				if (!data.wrapSalt) {
+					const raw = Buffer.from(data.wrappedMaster, 'base64');
+					setMasterKey(raw);
+					fitLogger.log('[Plugin] Loaded raw master key from settings');
+					return;
+				}
+			} catch (e) {
+				// Fall through to regenerate
+			}
+		}
+		// No existing master - create and persist raw master key
+		const master = crypto.randomBytes(32);
+		const newData = Object.assign({}, data, { wrappedMaster: master.toString('base64'), wrapSalt: '' });
+		await this.saveData(newData);
+		setMasterKey(master);
+		new Notice('FIT: master key auto-generated and enabled (encryption active)');
+		fitLogger.log('[Plugin] Auto-generated master key and stored in settings');
 	}
 
 	async lockEncryption() {

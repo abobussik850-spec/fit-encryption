@@ -12,3 +12,5 @@ export default {
   deriveFileKey: E.deriveFileKey,
   decryptPackage: D.decryptPackage,
 };
+
+export * from './path';

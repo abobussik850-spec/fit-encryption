@@ -10,7 +10,7 @@ import { Base64Content, FileContent, isBinaryExtension } from "./util/contentEnc
 import { detectNormalizationMismatches } from "./util/filePath";
 import { CommitSha } from "./util/hashing";
 import { getMasterKey, hasMasterKey } from './encryption/manager';
-import { deriveFileKey, encryptWithFileKey, decryptWithFileKey } from './encryption';
+import { deriveFileKey, encryptWithFileKey, decryptWithFileKey, encryptPathSegments, decryptPathSegments } from './encryption';
 
 // Helper to log SHA cache updates with provenance tracking
 function logCacheUpdate(
@@ -390,8 +390,19 @@ export class FitSync implements IFitSync {
 							continue; // not JSON, skip
 						}
 						if (pkg && pkg.nonce && pkg.ciphertext && pkg.tag) {
-							const fileKey = deriveFileKey(mk, item.path);
-							const aad = Buffer.from(item.path, 'utf8');
+							// Derive fileKey from package fileId (package includes stable fileId)
+							const fileId = pkg.fileId || item.path;
+							const fileKey = deriveFileKey(mk, fileId);
+							// Attempt to decrypt the remote path segments to original path
+							let originalPath = item.path;
+							try {
+								originalPath = decryptPathSegments(fileKey, item.path);
+								// replace path so subsequent write uses original filename
+								item.path = originalPath;
+							} catch (e) {
+								// not an encrypted path or failed to decrypt - keep as-is
+							}
+							const aad = Buffer.from(originalPath, 'utf8');
 							const plaintext = decryptWithFileKey(
 								fileKey,
 								Buffer.from(pkg.nonce, 'base64'),
@@ -938,6 +949,7 @@ export class FitSync implements IFitSync {
 
 		// If master key available, encrypt files before sending to remote
 		if (hasMasterKey()) {
+			fitLogger.log('[FitSync] Master key present - will attempt to encrypt outgoing files');
 			const mk = getMasterKey()!;
 			for (let i = 0; i < filesToWrite.length; i++) {
 				const entry = filesToWrite[i];
@@ -962,6 +974,14 @@ export class FitSync implements IFitSync {
 					const fileKey = deriveFileKey(mk, fileId);
 					const aad = Buffer.from(entry.path, 'utf8');
 					const { nonce, ciphertext, tag } = encryptWithFileKey(fileKey, plaintextBuf, aad);
+					// Encrypt filename (path) segments so remote tree stores encrypted names
+					try {
+						const encryptedPath = encryptPathSegments(fileKey, entry.path);
+						entry.path = encryptedPath;
+					} catch (e) {
+						// if path encryption fails, log and continue with original path
+						fitLogger.log('[FitSync] Failed to encrypt path segments - uploading under original path', { path: entry.path, error: e });
+					}
 					const pkg = {
 						version: 1,
 						salt: '',
@@ -978,6 +998,10 @@ export class FitSync implements IFitSync {
 					throw err;
 				}
 			}
+			fitLogger.log('[FitSync] Encrypted files prepared for upload', { count: filesToWrite.length });
+		}
+		else {
+			fitLogger.log('[FitSync] No master key present - uploading plaintext files', { count: filesToWrite.length });
 		}
 
 		// Skip files larger than threshold to avoid uploading very large files
