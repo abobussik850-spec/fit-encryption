@@ -7,6 +7,9 @@
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"build:bundle": "npm run build",
+		"dev:install": "node scripts/install-plugin.js",
+		"package:zip": "mkdir -p dist && (zip -r dist/fit-plugin.zip main.js manifest.json styles.css || true)",
 		"typecheck": "tsc -noEmit -skipLibCheck",
 		"lint": "eslint",
 		"lint:fix": "eslint --fix",
