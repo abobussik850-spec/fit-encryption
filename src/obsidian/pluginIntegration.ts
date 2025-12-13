@@ -135,7 +135,7 @@ export default class FitEncryptionPlugin extends Plugin {
 
     this.addCommand({
       id: 'fit-export-master-key',
-      name: 'FIT: Export master key (password-wrapped, safe for git)',
+      name: 'FIT: Export master key',
       callback: async () => {
         try {
           const mk = getMasterKey();
@@ -164,7 +164,7 @@ export default class FitEncryptionPlugin extends Plugin {
 
     this.addCommand({
       id: 'fit-import-master-key',
-      name: 'FIT: Import master key (password-wrapped)',
+      name: 'FIT: Import master key',
       callback: async () => {
         try {
           const filePath = await promptWithModal<string | null>(new FilePathModal(this.app, 'Enter file path to import wrapped master key from'));
