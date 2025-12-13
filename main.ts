@@ -507,105 +507,6 @@ export default class FitPlugin extends Plugin {
 			});
 
 			this.addCommand({
-				id: 'fit-import-master-key',
-				name: 'FIT: Import master key from file',
-				callback: async () => {
-					if (typeof window === 'undefined') {
-						new Notice('Import not supported in non-UI environment');
-						return;
-					}
-					// Create file input
-					const input = document.createElement('input');
-					input.type = 'file';
-					input.accept = '.txt';
-					document.body.appendChild(input);
-					const file: File | null = await new Promise((resolve) => {
-						input.addEventListener('change', () => resolve(input.files ? input.files[0] : null), { once: true });
-						input.click();
-					});
-					document.body.removeChild(input);
-					if (!file) { new Notice('No file selected'); return; }
-					const text = await new Promise<string>((res, rej) => {
-						const fr = new FileReader();
-						fr.onload = () => res(String(fr.result));
-						fr.onerror = () => rej(new Error('Failed to read file'));
-						fr.readAsText(file);
-					});
-					// Extract base64-looking token (the exported file places the key on its own line)
-					const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-					let keyB64: string | null = null;
-					for (const line of lines) {
-						if (/^[A-Za-z0-9+/=]{40,}$/.test(line)) { keyB64 = line; break; }
-					}
-					if (!keyB64) {
-						new Notice('No base64 key found in file');
-						return;
-					}
-					let masterBuf: Buffer;
-					try {
-						masterBuf = Buffer.from(keyB64, 'base64');
-					} catch (e) {
-						new Notice('Invalid base64 in file');
-						return;
-					}
-					// Ask user if they want to protect the key with a password
-					const wrap = confirm('Wrap imported master key with a password for secure storage? (recommended)');
-					if (!wrap) {
-						// Store raw (compatibility) — warn user
-						if (!confirm('Storing master key raw is insecure. Are you sure?')) {
-							new Notice('Import cancelled');
-							return;
-						}
-						const data = Object.assign({}, await this.loadData(), { wrappedMaster: masterBuf.toString('base64'), wrapSalt: '' });
-						await this.saveData(data);
-						setMasterKey(masterBuf);
-						new Notice('Master key imported and stored (raw). Consider wrapping it with a password.');
-						fitLogger.log('[Plugin] Imported master key stored raw');
-						return;
-					}
-					let password: string | null = null;
-					while (!password) {
-						password = window.prompt('Enter password to wrap imported master key (min 8 chars)');
-						if (!password) { new Notice('Import cancelled'); return; }
-						if (password.length < 8) { new Notice('Password too short'); password = null; }
-					}
-					const wrapSalt = crypto.randomBytes(16);
-					let wrapKey: Buffer;
-					try {
-						const argon2 = await import('argon2');
-						const raw = await (argon2 as any).hash(password, {
-							type: (argon2 as any).argon2id,
-							salt: wrapSalt,
-							raw: true,
-							hashLength: 32,
-							timeCost: 4,
-							memoryCost: 1 << 18,
-							parallelism: 1,
-						});
-						wrapKey = Buffer.from(raw);
-					} catch (e) {
-						wrapKey = crypto.scryptSync(password, wrapSalt, 32);
-					}
-					const wrapNonce = crypto.randomBytes(12);
-					const { getAeadAlgorithm } = await import('./src/encryption/alg');
-					const algo = getAeadAlgorithm();
-					const enc = crypto.createCipheriv(algo, wrapKey, wrapNonce, { authTagLength: 16 } as any);
-					const wrapped = Buffer.concat([enc.update(masterBuf), enc.final()]);
-					const wrapTag = (enc as any).getAuthTag();
-					const newData = Object.assign({}, await this.loadData(), {
-						wrappedMaster: wrapped.toString('base64'),
-						wrapSalt: wrapSalt.toString('base64'),
-						wrapNonce: wrapNonce.toString('base64'),
-						wrapTag: wrapTag.toString('base64')
-					});
-					await this.saveData(newData);
-					setMasterKey(masterBuf);
-					new Notice('Master key imported and stored wrapped with your password');
-					fitLogger.log('[Plugin] Imported master key and stored wrapped');
-				}
-			});
-
-			this.addCommand({
 				id: 'fit-rotate-master-key',
 				name: 'FIT: Rotate master key (re-encrypt remote files)',
 				callback: async () => await this.rotateMasterKey(),
@@ -773,10 +674,8 @@ export default class FitPlugin extends Plugin {
 	 */
 	private async ensureMasterKey(): Promise<void> {
 		const data = await this.loadData();
-		// If a wrapped master exists, try to load it. We support both wrapped
-		// (wrapSalt present) and legacy raw storage (wrapSalt empty) for
-		// compatibility. In UI environments prompt for password to unwrap.
 		if (data && data.wrappedMaster) {
+			// If wrappedMaster exists, treat empty wrapSalt as a raw stored master
 			try {
 				if (!data.wrapSalt) {
 					const raw = Buffer.from(data.wrappedMaster, 'base64');
@@ -784,120 +683,17 @@ export default class FitPlugin extends Plugin {
 					fitLogger.log('[Plugin] Loaded raw master key from settings');
 					return;
 				}
-				// Wrapped storage: require user password in UI to unwrap
-				if (typeof window !== 'undefined') {
-					let attempts = 0;
-					while (attempts < 3) {
-						const password = window.prompt('Enter password to unlock master key');
-						if (!password) break;
-						try {
-							const wrapSalt = Buffer.from(data.wrapSalt, 'base64');
-							let wrapKey: Buffer;
-							try {
-								const argon2 = await import('argon2');
-								const raw = await (argon2 as any).hash(password, {
-									type: (argon2 as any).argon2id,
-									salt: wrapSalt,
-									raw: true,
-									hashLength: 32,
-									timeCost: 4,
-									memoryCost: 1 << 18, // 256MB
-									parallelism: 1,
-								});
-								wrapKey = Buffer.from(raw);
-							} catch (e) {
-								wrapKey = crypto.scryptSync(password, wrapSalt, 32);
-							}
-							const wrapNonce = Buffer.from(data.wrapNonce, 'base64');
-							const wrapTag = Buffer.from(data.wrapTag, 'base64');
-							const wrapped = Buffer.from(data.wrappedMaster, 'base64');
-							const { getAeadAlgorithm } = await import('./src/encryption/alg');
-							const algo = getAeadAlgorithm();
-							const dec = crypto.createDecipheriv(algo, wrapKey, wrapNonce, { authTagLength: 16 } as any);
-							(dec as any).setAuthTag(wrapTag);
-							const master = Buffer.concat([dec.update(wrapped), dec.final()]);
-							setMasterKey(master);
-							fitLogger.log('[Plugin] Master key unwrapped and loaded in memory');
-							new Notice('FIT: master key unwrapped and loaded');
-							return;
-						} catch (err) {
-							attempts++;
-							fitLogger.log('[Plugin] Failed to unwrap master key', { attempt: attempts, error: err });
-							new Notice('Failed to unlock: wrong password or corrupted data');
-						}
-					}
-					// If we reach here, user aborted or failed — fallthrough to generate new master
-				}
 			} catch (e) {
-				// If anything goes wrong, fall through to generate a new master
-				fitLogger.log('[Plugin] Error reading wrapped master, generating new', { error: e });
+				// Fall through to regenerate
 			}
 		}
-		// No existing master (or failed to unwrap) - create and persist wrapped master key
+		// No existing master - create and persist raw master key
 		const master = crypto.randomBytes(32);
-		// In non-UI/test environments preserve previous behavior (store raw) to avoid
-		// blocking automated tests. In UI, prompt user for a password to wrap the key.
-		if (typeof window === 'undefined') {
-			const newData = Object.assign({}, data, { wrappedMaster: master.toString('base64'), wrapSalt: '' });
-			await this.saveData(newData);
-			setMasterKey(master);
-			new Notice('FIT: master key auto-generated and enabled (encryption active)');
-			fitLogger.log('[Plugin] Auto-generated master key and stored in settings (raw for non-UI)');
-			return;
-		}
-		// UI environment — require wrapping password
-		let password: string | null = null;
-		while (!password) {
-			password = window.prompt('Create a password to protect your master key (minimum 8 characters)');
-			if (!password) {
-				if (!confirm('No password entered — master key will not be persisted. Continue without persisting?')) {
-					password = null;
-					continue;
-				}
-				// User accepted not persisting — set in-memory only
-				setMasterKey(master);
-				new Notice('Master key created in memory only; please export it now to keep access.');
-				fitLogger.log('[Plugin] Master key created in memory only (user declined password)');
-				return;
-			}
-			if (password.length < 8) {
-				new Notice('Password too short — please choose at least 8 characters');
-				password = null;
-			}
-		}
-		const wrapSalt = crypto.randomBytes(16);
-		let wrapKey: Buffer;
-		try {
-			const argon2 = await import('argon2');
-			const raw = await (argon2 as any).hash(password, {
-				type: (argon2 as any).argon2id,
-				salt: wrapSalt,
-				raw: true,
-				hashLength: 32,
-				timeCost: 4,
-				memoryCost: 1 << 18, // 256MB
-				parallelism: 1,
-			});
-			wrapKey = Buffer.from(raw);
-		} catch (e) {
-			wrapKey = crypto.scryptSync(password, wrapSalt, 32);
-		}
-		const wrapNonce = crypto.randomBytes(12);
-		const { getAeadAlgorithm } = await import('./src/encryption/alg');
-		const algo = getAeadAlgorithm();
-		const enc = crypto.createCipheriv(algo, wrapKey, wrapNonce, { authTagLength: 16 } as any);
-		const wrapped = Buffer.concat([enc.update(master), enc.final()]);
-		const wrapTag = (enc as any).getAuthTag();
-		const newData = Object.assign({}, data, {
-			wrappedMaster: wrapped.toString('base64'),
-			wrapSalt: wrapSalt.toString('base64'),
-			wrapNonce: wrapNonce.toString('base64'),
-			wrapTag: wrapTag.toString('base64')
-		});
+		const newData = Object.assign({}, data, { wrappedMaster: master.toString('base64'), wrapSalt: '' });
 		await this.saveData(newData);
 		setMasterKey(master);
-		new Notice('FIT: master key generated and stored (wrapped with password)');
-		fitLogger.log('[Plugin] Auto-generated master key and stored wrapped in settings');
+		new Notice('FIT: master key auto-generated and enabled (encryption active)');
+		fitLogger.log('[Plugin] Auto-generated master key and stored in settings');
 	}
 
 	async lockEncryption() {
