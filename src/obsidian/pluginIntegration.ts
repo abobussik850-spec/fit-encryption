@@ -1,12 +1,14 @@
-import { Plugin, Modal, App, Notice, TFile } from 'obsidian';
+import { Plugin, Modal, App, Notice } from 'obsidian';
 import crypto from 'crypto';
-import { setMasterKey, clearMasterKey } from '../encryption/manager';
+import { setMasterKey } from '../encryption/manager';
+import { exportMasterKeyWrappedToFile, importMasterKeyWrappedFromFile } from '../encryption/exportImport';
+import { getMasterKey } from '../encryption/manager';
 
 type StoredSettings = {
-  wrappedMaster?: string; // base64 ciphertext
-  wrapSalt?: string; // base64
-  wrapNonce?: string; // base64
-  wrapTag?: string; // base64
+  wrappedMaster?: string;
+  wrapSalt?: string;
+  wrapNonce?: string;
+  wrapTag?: string;
 };
 
 class PasswordModal extends Modal {
@@ -39,6 +41,51 @@ class PasswordModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
   }
+}
+
+class FilePathModal extends Modal {
+  result: string | null = null;
+  prompt: string;
+  constructor(app: App, prompt: string) {
+    super(app);
+    this.prompt = prompt;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h3', { text: this.prompt });
+    const input = contentEl.createEl('input') as HTMLInputElement;
+    input.type = 'text';
+    input.style.width = '100%';
+    input.placeholder = '/path/to/file.bin';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        this.result = input.value;
+        this.close();
+      }
+    });
+    input.focus();
+    const btn = contentEl.createEl('button', { text: 'OK' });
+    btn.addEventListener('click', () => {
+      this.result = input.value;
+      this.close();
+    });
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+}
+
+// small helpers for prompting
+function promptWithModal<T>(modal: Modal): Promise<T | null> {
+  modal.open();
+  return new Promise((resolve) => {
+    const prev = (modal as any).onClose;
+    (modal as any).onClose = () => {
+      if (prev) prev();
+      resolve((modal as any).result ?? null);
+    };
+  });
 }
 
 export default class FitEncryptionPlugin extends Plugin {
@@ -82,6 +129,60 @@ export default class FitEncryptionPlugin extends Plugin {
         } catch (err) {
           console.error(err);
           new Notice('FIT: Migration failed');
+        }
+      },
+    });
+
+    this.addCommand({
+      id: 'fit-export-master-key',
+      name: 'FIT: Export master key (password-wrapped, safe for git)',
+      callback: async () => {
+        try {
+          const mk = getMasterKey();
+          if (!mk) {
+            new Notice('No master key loaded in memory to export');
+            return;
+          }
+          const password = await promptWithModal<string | null>(new PasswordModal(this.app, 'Enter password to wrap the master key'));
+          if (!password) {
+            new Notice('Export cancelled');
+            return;
+          }
+          const filePath = await promptWithModal<string | null>(new FilePathModal(this.app, 'Enter file path to export wrapped master key to'));
+          if (!filePath) {
+            new Notice('Export cancelled');
+            return;
+          }
+          await exportMasterKeyWrappedToFile(filePath, password);
+          new Notice('Wrapped master key exported');
+        } catch (err) {
+          console.error('Wrapped export failed', err);
+          new Notice('Wrapped export failed');
+        }
+      },
+    });
+
+    this.addCommand({
+      id: 'fit-import-master-key',
+      name: 'FIT: Import master key (password-wrapped)',
+      callback: async () => {
+        try {
+          const filePath = await promptWithModal<string | null>(new FilePathModal(this.app, 'Enter file path to import wrapped master key from'));
+          if (!filePath) {
+            new Notice('Import cancelled');
+            return;
+          }
+          const password = await promptWithModal<string | null>(new PasswordModal(this.app, 'Enter password to unwrap the master key'));
+          if (!password) {
+            new Notice('Import cancelled');
+            return;
+          }
+          await importMasterKeyWrappedFromFile(filePath, password);
+          this.masterKey = getMasterKey();
+          new Notice('Wrapped master key imported and loaded into memory');
+        } catch (err) {
+          console.error('Wrapped import failed', err);
+          new Notice('Wrapped import failed');
         }
       },
     });

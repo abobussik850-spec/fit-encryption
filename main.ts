@@ -488,8 +488,8 @@ export default class FitPlugin extends Plugin {
 					
 					// Create a blob and download as file
 					const timestamp = new Date().toISOString().slice(0, 10);
-					const filename = `fit-master-key-${timestamp}.txt`;
-					const content = `FIT Master Key (Base64)\n======================\n\n${keyB64}\n\n⚠️ KEEP THIS SECRET!\nIf you lose this key, you cannot decrypt your files.\nStore it safely (e.g., password manager, encrypted drive).`;
+					const filename = `fit-master-key-${timestamp}.fitkey`;
+					const content = keyB64 + "\n";
 					
 					const blob = new Blob([content], { type: 'text/plain' });
 					const url = URL.createObjectURL(blob);
@@ -517,7 +517,7 @@ export default class FitPlugin extends Plugin {
 					// Create file input
 					const input = document.createElement('input');
 					input.type = 'file';
-					input.accept = '.txt';
+					input.accept = '.fitkey,.txt';
 					document.body.appendChild(input);
 					const file: File | null = await new Promise((resolve) => {
 						input.addEventListener('change', () => resolve(input.files ? input.files[0] : null), { once: true });

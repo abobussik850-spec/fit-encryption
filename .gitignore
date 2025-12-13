@@ -1,3 +1,18 @@
+# Ignore exported master key files and common local secret containers
+# These are intentionally conservative — adjust if you use different names/paths.
+
+# FIT plugin master key (binary export/import helper)
+master-key.bin
+*.master-key.bin
+
+# FIT helper directory (common choice for local exports)
+.fit/
+
+# Patterns for portable/exported keys
+*.fit-key
+*.fit-master-key
+
+# DO NOT ignore generic key files by default; the above are specific patterns.
 # vscode
 .vscode 
 
