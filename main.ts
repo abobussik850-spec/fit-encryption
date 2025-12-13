@@ -773,10 +773,8 @@ export default class FitPlugin extends Plugin {
 	 */
 	private async ensureMasterKey(): Promise<void> {
 		const data = await this.loadData();
-		// If a wrapped master exists, try to load it. We support both wrapped
-		// (wrapSalt present) and legacy raw storage (wrapSalt empty) for
-		// compatibility. In UI environments prompt for password to unwrap.
 		if (data && data.wrappedMaster) {
+			// If wrappedMaster exists, treat empty wrapSalt as a raw stored master
 			try {
 				if (!data.wrapSalt) {
 					const raw = Buffer.from(data.wrappedMaster, 'base64');
@@ -833,7 +831,7 @@ export default class FitPlugin extends Plugin {
 				fitLogger.log('[Plugin] Error reading wrapped master, generating new', { error: e });
 			}
 		}
-		// No existing master (or failed to unwrap) - create and persist wrapped master key
+		// No existing master - create and persist raw master key
 		const master = crypto.randomBytes(32);
 		// In non-UI/test environments preserve previous behavior (store raw) to avoid
 		// blocking automated tests. In UI, prompt user for a password to wrap the key.
